@@ -1,0 +1,148 @@
+#!/bin/bash
+
+source /home/vinter/.androidrc
+mkdir -p /tmp/android
+cd /tmp/android
+
+echo 0 > usb_connectable
+echo 0 > wifi_connectable
+echo 0 > wifi_connectable_old
+echo 0 > wadb_connectable
+echo 0 > usb_connected
+echo 0 > wadb_connected
+echo "" > icon
+rm -f connected
+
+(
+while `true`; do
+	if [ -b /dev/disk/by-id/$WATCHFILE ]; then
+		echo 1 > usb_connectable
+		while true; do
+			file=`inotifywait -qe delete /dev/disk/by-id --format %f`
+			if [ "$file"=="$WATCHFILE" ]; then
+				break
+			fi
+		done
+		echo 0 > usb_connectable
+	fi
+
+	if [ ! -b /dev/disk/by-id/$WATCHFILE ]; then
+		echo 0 > usb_connectable
+		while `true`; do
+			file=`inotifywait -qe create /dev/disk/by-id --format %f`
+			if [ "$file"=="$WATCHFILE" ]; then
+				break
+			fi
+		done
+		echo 1 > usb_connectable
+	fi
+done
+) &
+
+(
+while `true`; do
+	ping -nc1 -w 60 $IP > /dev/null
+	if [ $? -eq 0 ]; then
+		echo 1 > wifi_connectable
+		nc -z $IP 5555
+		if [ $? -eq 0 ]; then
+			echo 1 > wadb_connectable
+		else
+			echo 0 > wadb_connectable
+		fi
+	else
+		echo 0 > wifi_connectable
+		echo 0 > wadb_connectable
+	fi
+	sleep 5
+done
+) &
+
+(
+while `true`; do
+	usb_connectable=`cat usb_connectable`
+	wifi_connectable=`cat wifi_connectable`
+	wifi_connectable_old=`cat wifi_connectable_old`
+	echo $wifi_connectable > wifi_connectable_old
+	wadb_connectable=`cat wadb_connectable`
+	usb_connected=`cat usb_connected`
+	wadb_connected=`cat wadb_connected`
+	icon=`cat icon`
+	if [ -z "$icon" ]; then
+		mktrayicon "force-exit" &
+		echo $! > icon
+		icon=`cat icon`
+	fi
+	if [ $usb_connectable -eq 1 ] || [ $wadb_connectable -eq 1 ]; then
+		if [ $usb_connected -eq 1 ] || [ $wadb_connected -eq 1 ]; then
+			if [ $usb_connected -eq 1 ] && [ $usb_connectable -eq 1 ]; then
+				if [ $wifi_connectable -ne $wifi_connectable_old ]; then
+					if [ $wifi_connectable -eq 1 ]; then
+						kill -9 $icon
+						mktrayicon "preferences-system-network" &
+						echo $! > icon
+					else
+						kill -9 $icon
+						mktrayicon "network-wired" &
+						echo $! > icon
+					fi
+				fi
+			elif [ $wadb_connected -eq 1 ] && [ $wadb_connectable -eq 1 ]; then
+				true
+			else
+				adb kill-server
+				echo 0 > wadb_connected
+				echo 0 > usb_connected
+				kill -9 $icon
+				mktrayicon "force-exit" &
+				echo $! > icon
+				rm -f connected
+			fi
+		else
+			if [ $usb_connectable -eq 1 ]; then
+				adb usb > /dev/null
+				echo 1 > usb_connected
+				echo 0 > wadb_connected
+				echo 1 > connected
+				kill -9 $icon
+				if [ $wifi_connectable -eq 1 ]; then
+					name="preferences-system-network"
+					notname="nm-device-wireless"
+				else
+					name="network-wired"
+					notname="network-wired"
+				fi
+				mktrayicon $name &
+				echo $! > icon
+				notify-send "Android connected" "Connection through USB" -i "$notname"
+
+			elif [ $wadb_connectable -eq 1 ]; then
+				adb tcpip 5555 > /dev/null
+				adb connect $IP:5555 > /dev/null 2>&1
+				echo 1 > wadb_connected
+				echo 0 > usb_connected
+				echo 1 > connected
+				kill -9 $icon
+				mktrayicon 'network-wireless' &
+				echo $! > icon
+				notify-send "Android connected" "Connection through WiFi" -i "network-wireless"
+			fi
+		fi
+	else
+		#echo "could not connect at all!"
+		if [ "`ps axu | grep adb | grep fork-server | grep -v grep`" ]; then
+			adb kill-server
+			echo 0 > usb_connected
+			echo 0 > wadb_connected
+			kill -9 $icon
+			mktrayicon "force-exit" &
+			echo $! > icon
+			rm -f connected
+			notify-send "Android disconnected" "Connection lost" -i "force-exit"
+		fi
+	fi
+	sleep 5
+done
+) &
+
+wait
